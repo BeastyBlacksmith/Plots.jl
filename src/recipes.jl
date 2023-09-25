@@ -1070,7 +1070,7 @@ end
 # ---------------------------------------------------------------------------
 # Error Bars
 
-@attributes function error_style!(plotattributes::AKW)
+Commons.@attributes function error_style!(plotattributes::AKW)
     # errorbar color should soley determined by markerstrokecolor
     haskey(plotattributes, :marker_z) && reset_kw!(plotattributes, :marker_z)
     haskey(plotattributes, :line_z) && reset_kw!(plotattributes, :line_z)
