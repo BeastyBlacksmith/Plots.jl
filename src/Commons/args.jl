@@ -27,6 +27,14 @@ function add_non_underscore_aliases!(aliases::Dict{Symbol,Symbol})
     end
 end
 
+replaceAlias!(plotattributes::AKW, k::Symbol, aliases::Dict{Symbol,Symbol}) =
+    if haskey(aliases, k)
+        plotattributes[aliases[k]] = RecipesPipeline.pop_kw!(plotattributes, k)
+    end
+
+replaceAliases!(plotattributes::AKW, aliases::Dict{Symbol,Symbol}) =
+    foreach(k -> replaceAlias!(plotattributes, k, aliases), collect(keys(plotattributes)))
+
 macro attributes(expr::Expr)
     RecipesBase.process_recipe_body!(expr)
     expr
@@ -121,11 +129,6 @@ const _surface_like =
 like_histogram(seriestype::Symbol) = seriestype in _histogram_like
 like_line(seriestype::Symbol)      = seriestype in _line_like
 like_surface(seriestype::Symbol)   = RecipesPipeline.is_surface(seriestype)
-
-RecipesPipeline.is3d(series::Series) = RecipesPipeline.is3d(series.plotattributes)
-RecipesPipeline.is3d(sp::Subplot) = string(sp.attr[:projection]) == "3d"
-ispolar(sp::Subplot) = string(sp.attr[:projection]) == "polar"
-ispolar(series::Series) = ispolar(series.plotattributes[:subplot])
 
 # ------------------------------------------------------------
 
@@ -229,11 +232,6 @@ const _positionAliases = Dict{Symbol,Symbol}(
     :bottom_right  => :bottomright,
     :br            => :bottomright,
 )
-
-const _allScales = [:identity, :ln, :log2, :log10, :asinh, :sqrt]
-const _logScales = [:ln, :log2, :log10]
-const _logScaleBases = Dict(:ln => ℯ, :log2 => 2.0, :log10 => 10.0)
-const _scaleAliases = Dict{Symbol,Symbol}(:none => :identity, :log => :log10)
 
 const _allGridSyms = [
     :x,
@@ -356,7 +354,6 @@ const _series_defaults = KW(
     :line_z             => nothing,
     :fill_z             => nothing,
     :levels             => 15,
-    :orientation        => :vertical,
     :bar_position       => :overlay,  # for bar plots and histograms: could also be stack (stack up) or dodge (side by side)
     :bar_width          => nothing,
     :bar_edges          => false,
@@ -522,6 +519,18 @@ const _axis_defaults = KW(
     :unitformat                  => :round,
 )
 
+# add defaults for the letter versions
+const _axis_defaults_byletter = KW()
+
+reset_axis_defaults_byletter!() =
+    for letter in (:x, :y, :z)
+        _axis_defaults_byletter[letter] = KW()
+        for (k, v) in _axis_defaults
+            _axis_defaults_byletter[letter][k] = v
+        end
+    end
+reset_axis_defaults_byletter!()
+
 const _suppress_warnings = Set{Symbol}([
     :x_discrete_indices,
     :y_discrete_indices,
@@ -540,6 +549,62 @@ const _suppress_warnings = Set{Symbol}([
     :y_extrema,
     :z_extrema,
 ])
+
+const _internal_args = [
+    :plot_object,
+    :series_plotindex,
+    :series_index,
+    :markershape_to_add,
+    :letter,
+    :idxfilter,
+]
+
+const _axis_args = Set(keys(_axis_defaults))
+const _series_args = Set(keys(_series_defaults))
+const _subplot_args = Set(keys(_subplot_defaults))
+const _plot_args = Set(keys(_plot_defaults))
+
+const _magic_axis_args = [:axis, :tickfont, :guidefont, :grid, :minorgrid]
+const _magic_subplot_args =
+    [:title_font, :legend_font, :legend_title_font, :plot_title_font, :colorbar_titlefont]
+const _magic_series_args = [:line, :marker, :fill]
+const _all_magic_args =
+    Set(union(_magic_axis_args, _magic_series_args, _magic_subplot_args))
+
+const _all_axis_args = union(_axis_args, _magic_axis_args)
+const _lettered_all_axis_args =
+    Set([Symbol(letter, kw) for letter in (:x, :y, :z) for kw in _all_axis_args])
+const _all_subplot_args = union(_subplot_args, _magic_subplot_args)
+const _all_series_args = union(_series_args, _magic_series_args)
+const _all_plot_args = _plot_args
+
+const _all_args =
+    union(_lettered_all_axis_args, _all_subplot_args, _all_series_args, _all_plot_args)
+
+const _deprecated_attributes = Dict{Symbol,Symbol}()
+const _all_defaults = KW[_series_defaults, _plot_defaults, _subplot_defaults]
+
+const _initial_defaults = deepcopy(_all_defaults)
+const _initial_axis_defaults = deepcopy(_axis_defaults)
+
+# to be able to reset font sizes to initial values
+const _initial_plt_fontsizes =
+    Dict(:plot_titlefontsize => _plot_defaults[:plot_titlefontsize])
+
+const _initial_sp_fontsizes = Dict(
+    :titlefontsize => _subplot_defaults[:titlefontsize],
+    :annotationfontsize => _subplot_defaults[:annotationfontsize],
+    :colorbar_tickfontsize => _subplot_defaults[:colorbar_tickfontsize],
+    :colorbar_titlefontsize => _subplot_defaults[:colorbar_titlefontsize],
+)
+
+const _initial_ax_fontsizes = Dict(
+    :tickfontsize  => _axis_defaults[:tickfontsize],
+    :guidefontsize => _axis_defaults[:guidefontsize],
+)
+
+const _initial_fontsizes =
+    merge(_initial_plt_fontsizes, _initial_sp_fontsizes, _initial_ax_fontsizes)
 
 is_subplot_attr(k) = k in _all_subplot_args
 is_series_attr(k) = k in _all_series_args
@@ -1032,7 +1097,7 @@ end
 function default(; reset = true, kw...)
     (reset && isempty(kw)) && reset_defaults()
     kw = KW(kw)
-    Plots.preprocess_attributes!(kw)
+    preprocess_attributes!(kw)
     for (k, v) in kw
         default(k, v)
     end
@@ -1323,276 +1388,9 @@ function _add_markershape(plotattributes::AKW)
     end
 end
 
-"Handle all preprocessing of args... break out colors/sizes/etc and replace aliases."
-function preprocess_attributes!(plotattributes::AKW)
-    replaceAliases!(plotattributes, _keyAliases)
 
-    # handle axis args common to all axis
-    args = wraptuple(RecipesPipeline.pop_kw!(plotattributes, :axis, ()))
-    showarg = wraptuple(RecipesPipeline.pop_kw!(plotattributes, :showaxis, ()))
-    for arg in wraptuple((args..., showarg...))
-        for letter in (:x, :y, :z)
-            process_axis_arg!(plotattributes, arg, letter)
-        end
-    end
-    # handle axis args
-    for letter in (:x, :y, :z)
-        asym = get_attr_symbol(letter, :axis)
-        args = RecipesPipeline.pop_kw!(plotattributes, asym, ())
-        if !(typeof(args) <: Axis)
-            for arg in wraptuple(args)
-                process_axis_arg!(plotattributes, arg, letter)
-            end
-        end
-    end
 
-    # vline and others accesses the y argument but actually maps it to the x axis.
-    # Hence, we have to take care of formatters
-    if treats_y_as_x(get(plotattributes, :seriestype, :path))
-        xformatter = get(plotattributes, :xformatter, :auto)
-        yformatter = get(plotattributes, :yformatter, :auto)
-        yformatter !== :auto && (plotattributes[:xformatter] = yformatter)
-        xformatter === :auto &&
-            haskey(plotattributes, :yformatter) &&
-            pop!(plotattributes, :yformatter)
-    end
-
-    # handle grid args common to all axes
-    args = RecipesPipeline.pop_kw!(plotattributes, :grid, ())
-    for arg in wraptuple(args)
-        for letter in (:x, :y, :z)
-            processGridArg!(plotattributes, arg, letter)
-        end
-    end
-    # handle individual axes grid args
-    for letter in (:x, :y, :z)
-        gridsym = get_attr_symbol(letter, :grid)
-        args = RecipesPipeline.pop_kw!(plotattributes, gridsym, ())
-        for arg in wraptuple(args)
-            processGridArg!(plotattributes, arg, letter)
-        end
-    end
-    # handle minor grid args common to all axes
-    args = RecipesPipeline.pop_kw!(plotattributes, :minorgrid, ())
-    for arg in wraptuple(args)
-        for letter in (:x, :y, :z)
-            processMinorGridArg!(plotattributes, arg, letter)
-        end
-    end
-    # handle individual axes grid args
-    for letter in (:x, :y, :z)
-        gridsym = get_attr_symbol(letter, :minorgrid)
-        args = RecipesPipeline.pop_kw!(plotattributes, gridsym, ())
-        for arg in wraptuple(args)
-            processMinorGridArg!(plotattributes, arg, letter)
-        end
-    end
-    # handle font args common to all axes
-    for fontname in (:tickfont, :guidefont)
-        args = RecipesPipeline.pop_kw!(plotattributes, fontname, ())
-        for arg in wraptuple(args)
-            for letter in (:x, :y, :z)
-                processFontArg!(plotattributes, get_attr_symbol(letter, fontname), arg)
-            end
-        end
-    end
-    # handle individual axes font args
-    for letter in (:x, :y, :z)
-        for fontname in (:tickfont, :guidefont)
-            args = RecipesPipeline.pop_kw!(
-                plotattributes,
-                get_attr_symbol(letter, fontname),
-                (),
-            )
-            for arg in wraptuple(args)
-                processFontArg!(plotattributes, get_attr_symbol(letter, fontname), arg)
-            end
-        end
-    end
-    # handle axes args
-    for k in _axis_args
-        if haskey(plotattributes, k) && k !== :link
-            v = plotattributes[k]
-            for letter in (:x, :y, :z)
-                lk = get_attr_symbol(letter, k)
-                if !is_explicit(plotattributes, lk)
-                    plotattributes[lk] = v
-                end
-            end
-        end
-    end
-
-    # fonts
-    for fontname in
-        (:titlefont, :legend_title_font, :plot_titlefont, :colorbar_titlefont, :legend_font)
-        args = RecipesPipeline.pop_kw!(plotattributes, fontname, ())
-        for arg in wraptuple(args)
-            processFontArg!(plotattributes, fontname, arg)
-        end
-    end
-
-    # handle line args
-    for arg in wraptuple(RecipesPipeline.pop_kw!(plotattributes, :line, ()))
-        processLineArg(plotattributes, arg)
-    end
-
-    if haskey(plotattributes, :seriestype) &&
-       haskey(_typeAliases, plotattributes[:seriestype])
-        plotattributes[:seriestype] = _typeAliases[plotattributes[:seriestype]]
-    end
-
-    # handle marker args... default to ellipse if shape not set
-    anymarker = false
-    for arg in wraptuple(get(plotattributes, :marker, ()))
-        processMarkerArg(plotattributes, arg)
-        anymarker = true
-    end
-    RecipesPipeline.reset_kw!(plotattributes, :marker)
-    if haskey(plotattributes, :markershape)
-        plotattributes[:markershape] = _replace_markershape(plotattributes[:markershape])
-        if plotattributes[:markershape] === :none &&
-           get(plotattributes, :seriestype, :path) in
-           (:scatter, :scatterbins, :scatterhist, :scatter3d) #the default should be :auto, not :none, so that :none can be set explicitly and would be respected
-            plotattributes[:markershape] = :circle
-        end
-    elseif anymarker
-        plotattributes[:markershape_to_add] = :circle  # add it after _apply_recipe
-    end
-
-    # handle fill
-    for arg in wraptuple(get(plotattributes, :fill, ()))
-        processFillArg(plotattributes, arg)
-    end
-    RecipesPipeline.reset_kw!(plotattributes, :fill)
-
-    # handle series annotations
-    if haskey(plotattributes, :series_annotations)
-        plotattributes[:series_annotations] =
-            series_annotations(wraptuple(plotattributes[:series_annotations])...)
-    end
-
-    # convert into strokes and brushes
-
-    if haskey(plotattributes, :arrow)
-        a = plotattributes[:arrow]
-        plotattributes[:arrow] = if a == true
-            arrow()
-        elseif a in (false, nothing, :none)
-            nothing
-        elseif !(typeof(a) <: Arrow || typeof(a) <: AbstractArray{Arrow})
-            arrow(wraptuple(a)...)
-        else
-            a
-        end
-    end
-
-    # legends - defaults are set in `src/components.jl` (see `@add_attributes`)
-    if haskey(plotattributes, :legend_position)
-        plotattributes[:legend_position] =
-            convertLegendValue(plotattributes[:legend_position])
-    end
-    if haskey(plotattributes, :colorbar)
-        plotattributes[:colorbar] = convertLegendValue(plotattributes[:colorbar])
-    end
-
-    # framestyle
-    if haskey(plotattributes, :framestyle) &&
-       haskey(_framestyleAliases, plotattributes[:framestyle])
-        plotattributes[:framestyle] = _framestyleAliases[plotattributes[:framestyle]]
-    end
-
-    # contours
-    if haskey(plotattributes, :levels)
-        check_contour_levels(plotattributes[:levels])
-    end
-
-    # warnings for moved recipes
-    st = get(plotattributes, :seriestype, :path)
-    if st in (:boxplot, :violin, :density) &&
-       !haskey(
-        Base.loaded_modules,
-        Base.PkgId(Base.UUID("f3b207a7-027a-5e70-b257-86293d7955fd"), "StatsPlots"),
-    )
-        @warn "seriestype $st has been moved to StatsPlots.  To use: \`Pkg.add(\"StatsPlots\"); using StatsPlots\`"
-    end
-    nothing
-end
-RecipesPipeline.preprocess_attributes!(plt::Plot, plotattributes::AKW) =
-    Plots.preprocess_attributes!(plotattributes)
-
-# -----------------------------------------------------------------------------
-
-const _already_warned = Dict{Symbol,Set{Symbol}}()
-const _to_warn = Set{Symbol}()
-
-should_warn_on_unsupported(::AbstractBackend) = _plot_defaults[:warn_on_unsupported]
-
-function warn_on_unsupported_args(pkg::AbstractBackend, plotattributes)
-    empty!(_to_warn)
-    bend = backend_name(pkg)
-    already_warned = get!(_already_warned, bend) do
-        Set{Symbol}()
-    end
-    extra_kwargs = Dict{Symbol,Any}()
-    for k in explicitkeys(plotattributes)
-        (is_attr_supported(pkg, k) && k ∉ keys(_deprecated_attributes)) && continue
-        k in _suppress_warnings && continue
-        if ismissing(default(k))
-            extra_kwargs[k] = pop_kw!(plotattributes, k)
-        elseif plotattributes[k] != default(k)
-            k in already_warned || push!(_to_warn, k)
-        end
-    end
-
-    if !isempty(_to_warn) &&
-       get(plotattributes, :warn_on_unsupported, should_warn_on_unsupported(pkg))
-        for k in sort(collect(_to_warn))
-            push!(already_warned, k)
-            if k in keys(_deprecated_attributes)
-                @warn """
-                Keyword argument `$k` is deprecated.
-                Please use `$(_deprecated_attributes[k])` instead.
-                """
-            else
-                @warn "Keyword argument $k not supported with $pkg.  Choose from: $(join(supported_attrs(pkg), ", "))"
-            end
-        end
-    end
-    extra_kwargs
-end
-
-# _markershape_supported(pkg::AbstractBackend, shape::Symbol) = shape in supported_markers(pkg)
-# _markershape_supported(pkg::AbstractBackend, shape::Shape) = Shape in supported_markers(pkg)
-# _markershape_supported(pkg::AbstractBackend, shapes::AVec) = all([_markershape_supported(pkg, shape) for shape in shapes])
-
-function warn_on_unsupported(pkg::AbstractBackend, plotattributes)
-    get(plotattributes, :warn_on_unsupported, should_warn_on_unsupported(pkg)) || return
-    is_seriestype_supported(pkg, plotattributes[:seriestype]) ||
-        @warn "seriestype $(plotattributes[:seriestype]) is unsupported with $pkg. Choose from: $(supported_seriestypes(pkg))"
-    is_style_supported(pkg, plotattributes[:linestyle]) ||
-        @warn "linestyle $(plotattributes[:linestyle]) is unsupported with $pkg. Choose from: $(supported_styles(pkg))"
-    is_marker_supported(pkg, plotattributes[:markershape]) ||
-        @warn "markershape $(plotattributes[:markershape]) is unsupported with $pkg. Choose from: $(supported_markers(pkg))"
-end
-
-function warn_on_unsupported_scales(pkg::AbstractBackend, plotattributes::AKW)
-    get(plotattributes, :warn_on_unsupported, should_warn_on_unsupported(pkg)) || return
-    for k in (:xscale, :yscale, :zscale, :scale)
-        if haskey(plotattributes, k)
-            v = plotattributes[k]
-            if !all(is_scale_supported.(Ref(pkg), v))
-                @warn """
-                scale $v is unsupported with $pkg.
-                Choose from: $(supported_scales(pkg))
-                """
-            end
-        end
-    end
-end
-
-# -----------------------------------------------------------------------------
-
-function convertLegendValue(val::Symbol)
+function convert_legend_value(val::Symbol)
     if val in (:both, :all, :yes)
         :best
     elseif val in (:no, :none)
@@ -1626,13 +1424,13 @@ function convertLegendValue(val::Symbol)
         error("Invalid symbol for legend: $val")
     end
 end
-convertLegendValue(val::Real) = val
-convertLegendValue(val::Bool) = val ? :best : :none
-convertLegendValue(val::Nothing) = :none
-convertLegendValue(v::Union{Tuple,NamedTuple}) = convertLegendValue.(v)
-convertLegendValue(v::Tuple{<:Real,<:Real}) = v
-convertLegendValue(v::Tuple{<:Real,Symbol}) = v
-convertLegendValue(v::AbstractArray) = map(convertLegendValue, v)
+convert_legend_value(val::Real) = val
+convert_legend_value(val::Bool) = val ? :best : :none
+convert_legend_value(val::Nothing) = :none
+convert_legend_value(v::Union{Tuple,NamedTuple}) = convert_legend_value.(v)
+convert_legend_value(v::Tuple{<:Real,<:Real}) = v
+convert_legend_value(v::Tuple{<:Real,Symbol}) = v
+convert_legend_value(v::AbstractArray) = map(convert_legend_value, v)
 
 # -----------------------------------------------------------------------------
 
@@ -1648,49 +1446,6 @@ function check_contour_levels(levels)
         ArgumentError |>
         throw
     end
-end
-
-# -----------------------------------------------------------------------------
-
-# 1-row matrices will give an element
-# multi-row matrices will give a column
-# InputWrapper just gives the contents
-# anything else is returned as-is
-function slice_arg(v::AMat, idx::Int)
-    isempty(v) && return v
-    c = mod1(idx, size(v, 2))
-    m, n = axes(v)
-    size(v, 1) == 1 ? v[first(m), n[c]] : v[:, n[c]]
-end
-slice_arg(wrapper::InputWrapper, idx) = wrapper.obj
-slice_arg(v::NTuple{2,AMat}, idx::Int) = slice_arg(v[1], idx), slice_arg(v[2], idx)
-slice_arg(v, idx) = v
-
-# given an argument key `k`, extract the argument value for this index,
-# and set into plotattributes[k]. Matrices are sliced by column.
-# if nothing is set (or container is empty), return the existing value.
-function slice_arg!(
-    plotattributes_in,
-    plotattributes_out,
-    k::Symbol,
-    idx::Int,
-    remove_pair::Bool,
-)
-    v = get(plotattributes_in, k, plotattributes_out[k])
-    plotattributes_out[k] = if haskey(plotattributes_in, k) && k ∉ _plot_args
-        slice_arg(v, idx)
-    else
-        v
-    end
-    remove_pair && RecipesPipeline.reset_kw!(plotattributes_in, k)
-    nothing
-end
-
-# -----------------------------------------------------------------------------
-
-function color_or_nothing!(plotattributes, k::Symbol)
-    plotattributes[k] = (v = plotattributes[k]) === :match ? v : plot_color(v)
-    nothing
 end
 
 # -----------------------------------------------------------------------------
@@ -1740,226 +1495,9 @@ const _match_map2 = Dict(
     :guidefontfamily => :fontfamily_subplot,
 )
 
-# properly retrieve from plt.attr, passing `:match` to the correct key
-Base.getindex(plt::Plot, k::Symbol) =
-    if (v = plt.attr[k]) === :match
-        plt[_match_map[k]]
-    else
-        v
-    end
-
-# properly retrieve from sp.attr, passing `:match` to the correct key
-Base.getindex(sp::Subplot, k::Symbol) =
-    if (v = sp.attr[k]) === :match
-        if haskey(_match_map2, k)
-            sp.plt[_match_map2[k]]
-        else
-            sp[_match_map[k]]
-        end
-    else
-        v
-    end
-
-# properly retrieve from axis.attr, passing `:match` to the correct key
-Base.getindex(axis::Axis, k::Symbol) =
-    if (v = axis.plotattributes[k]) === :match
-        if haskey(_match_map2, k)
-            axis.sps[1][_match_map2[k]]
-        else
-            axis[_match_map[k]]
-        end
-    else
-        v
-    end
-
-Base.getindex(series::Series, k::Symbol) = series.plotattributes[k]
-
-Base.setindex!(plt::Plot, v, k::Symbol)      = (plt.attr[k] = v)
-Base.setindex!(sp::Subplot, v, k::Symbol)    = (sp.attr[k] = v)
-Base.setindex!(axis::Axis, v, k::Symbol)     = (axis.plotattributes[k] = v)
-Base.setindex!(series::Series, v, k::Symbol) = (series.plotattributes[k] = v)
-
-Base.get(plt::Plot, k::Symbol, v)      = get(plt.attr, k, v)
-Base.get(sp::Subplot, k::Symbol, v)    = get(sp.attr, k, v)
-Base.get(axis::Axis, k::Symbol, v)     = get(axis.plotattributes, k, v)
-Base.get(series::Series, k::Symbol, v) = get(series.plotattributes, k, v)
-
 # -----------------------------------------------------------------------------
 
-function fg_color(plotattributes::AKW)
-    fg = get(plotattributes, :foreground_color, :auto)
-    if fg === :auto
-        bg = plot_color(get(plotattributes, :background_color, :white))
-        fg = alpha(bg) > 0 && isdark(bg) ? colorant"white" : colorant"black"
-    else
-        plot_color(fg)
-    end
-end
-
-# update attr from an input dictionary
-function _update_plot_args(plt::Plot, plotattributes_in::AKW)
-    for (k, v) in _plot_defaults
-        slice_arg!(plotattributes_in, plt.attr, k, 1, true)
-    end
-
-    # handle colors
-    plt[:background_color] = plot_color(plt.attr[:background_color])
-    plt[:foreground_color] = fg_color(plt.attr)
-    color_or_nothing!(plt.attr, :background_color_outside)
-end
-
 # -----------------------------------------------------------------------------
-
-function _update_subplot_periphery(sp::Subplot, anns::AVec)
-    # extend annotations, and ensure we always have a (x,y,PlotText) tuple
-    newanns = []
-    for ann in vcat(anns, sp[:annotations])
-        append!(newanns, process_annotation(sp, ann))
-    end
-    sp.attr[:annotations] = newanns
-
-    # handle legend/colorbar
-    sp.attr[:legend_position] = convertLegendValue(sp.attr[:legend_position])
-    sp.attr[:colorbar] = convertLegendValue(sp.attr[:colorbar])
-    if sp.attr[:colorbar] === :legend
-        sp.attr[:colorbar] = sp.attr[:legend_position]
-    end
-    nothing
-end
-
-function _update_subplot_colors(sp::Subplot)
-    # background colors
-    color_or_nothing!(sp.attr, :background_color_subplot)
-    sp.attr[:color_palette] = get_color_palette(sp.attr[:color_palette], 30)
-    color_or_nothing!(sp.attr, :legend_background_color)
-    color_or_nothing!(sp.attr, :background_color_inside)
-
-    # foreground colors
-    color_or_nothing!(sp.attr, :foreground_color_subplot)
-    color_or_nothing!(sp.attr, :legend_foreground_color)
-    color_or_nothing!(sp.attr, :foreground_color_title)
-    nothing
-end
-
-_update_margins(sp::Subplot) =
-    for sym in (:margin, :left_margin, :top_margin, :right_margin, :bottom_margin)
-        if (margin = get(sp.attr, sym, nothing)) isa Tuple
-            # transform e.g. (1, :mm) => 1 * Plots.mm
-            sp.attr[sym] = margin[1] * getfield(@__MODULE__, margin[2])
-        end
-    end
-
-function _update_axis(
-    plt::Plot,
-    sp::Subplot,
-    plotattributes_in::AKW,
-    letter::Symbol,
-    subplot_index::Int,
-)
-    # get (maybe initialize) the axis
-    axis = get_axis(sp, letter)
-
-    _update_axis(axis, plotattributes_in, letter, subplot_index)
-
-    # convert a bool into auto or nothing
-    if isa(axis[:ticks], Bool)
-        axis[:ticks] = axis[:ticks] ? :auto : nothing
-    end
-
-    _update_axis_colors(axis)
-    _update_axis_links(plt, axis, letter)
-    nothing
-end
-
-function _update_axis(
-    axis::Axis,
-    plotattributes_in::AKW,
-    letter::Symbol,
-    subplot_index::Int,
-)
-    # build the KW of arguments from the letter version (i.e. xticks --> ticks)
-    kw = KW()
-    for k in _all_axis_args
-        # first get the args without the letter: `tickfont = font(10)`
-        # note: we don't pop because we want this to apply to all axes! (delete after all have finished)
-        if haskey(plotattributes_in, k)
-            kw[k] = slice_arg(plotattributes_in[k], subplot_index)
-        end
-
-        # then get those args that were passed with a leading letter: `xlabel = "X"`
-        lk = get_attr_symbol(letter, k)
-
-        if haskey(plotattributes_in, lk)
-            kw[k] = slice_arg(plotattributes_in[lk], subplot_index)
-        end
-    end
-
-    # update the axis
-    attr!(axis; kw...)
-    nothing
-end
-
-function _update_axis_colors(axis::Axis)
-    # # update the axis colors
-    color_or_nothing!(axis.plotattributes, :foreground_color_axis)
-    color_or_nothing!(axis.plotattributes, :foreground_color_border)
-    color_or_nothing!(axis.plotattributes, :foreground_color_guide)
-    color_or_nothing!(axis.plotattributes, :foreground_color_text)
-    color_or_nothing!(axis.plotattributes, :foreground_color_grid)
-    color_or_nothing!(axis.plotattributes, :foreground_color_minor_grid)
-    nothing
-end
-
-function _update_axis_links(plt::Plot, axis::Axis, letter::Symbol)
-    # handle linking here.  if we're passed a list of
-    # other subplots to link to, link them together
-    (link = axis[:link]) |> isempty && return
-    for other_sp in link
-        link_axes!(axis, get_axis(get_subplot(plt, other_sp), letter))
-    end
-    axis.plotattributes[:link] = []
-    nothing
-end
-
-# update a subplots args and axes
-function _update_subplot_args(
-    plt::Plot,
-    sp::Subplot,
-    plotattributes_in,
-    subplot_index::Int,
-    remove_pair::Bool,
-)
-    anns = RecipesPipeline.pop_kw!(sp.attr, :annotations)
-
-    # grab those args which apply to this subplot
-    for k in keys(_subplot_defaults)
-        slice_arg!(plotattributes_in, sp.attr, k, subplot_index, remove_pair)
-    end
-
-    _update_subplot_colors(sp)
-    _update_margins(sp)
-    colorbar_update_keys =
-        (:clims, :colorbar, :seriestype, :marker_z, :line_z, :fill_z, :colorbar_entry)
-    if any(haskey.(Ref(plotattributes_in), colorbar_update_keys))
-        _update_subplot_colorbars(sp)
-    end
-
-    lims_warned = false
-    for letter in (:x, :y, :z)
-        _update_axis(plt, sp, plotattributes_in, letter, subplot_index)
-        lk = get_attr_symbol(letter, :lims)
-
-        # warn against using `Range` in x,y,z lims
-        if !lims_warned &&
-           haskey(plotattributes_in, lk) &&
-           plotattributes_in[lk] isa AbstractRange
-            @warn "lims should be a Tuple, not $(typeof(plotattributes_in[lk]))."
-            lims_warned = true
-        end
-    end
-
-    _update_subplot_periphery(sp, anns)
-end
 
 # -----------------------------------------------------------------------------
 
@@ -1970,20 +1508,6 @@ has_black_border_for_default(st::Function) =
     error("The seriestype attribute only accepts Symbols, you passed the function $st.")
 has_black_border_for_default(st::Symbol) =
     like_histogram(st) || st in (:hexbin, :bar, :shape)
-
-# converts a symbol or string into a Colorant or ColorGradient
-# and assigns a color automatically
-get_series_color(c, sp::Subplot, n::Int, seriestype) =
-    if c === :auto
-        like_surface(seriestype) ? cgrad() : _cycle(sp[:color_palette], n)
-    elseif isa(c, Int)
-        _cycle(sp[:color_palette], c)
-    else
-        c
-    end |> plot_color
-
-get_series_color(c::AbstractArray, sp::Subplot, n::Int, seriestype) =
-    map(x -> get_series_color(x, sp, n, seriestype), c)
 
 ensure_gradient!(plotattributes::AKW, csym::Symbol, asym::Symbol) =
     if plotattributes[csym] isa ColorPalette
@@ -1996,8 +1520,6 @@ ensure_gradient!(plotattributes::AKW, csym::Symbol, asym::Symbol) =
             cgrad(alpha = plotattributes[asym])
     end
 
-const DEFAULT_LINEWIDTH = Ref(1)
-
 # get a good default linewidth... 0 for surface and heatmaps
 _replace_linewidth(plotattributes::AKW) =
     if plotattributes[:linewidth] === :auto
@@ -2005,14 +1527,6 @@ _replace_linewidth(plotattributes::AKW) =
             (get(plotattributes, :seriestype, :path) ∉ (:surface, :heatmap, :image)) *
             DEFAULT_LINEWIDTH[]
     end
-
-function _slice_series_args!(plotattributes::AKW, plt::Plot, sp::Subplot, commandIndex::Int)
-    for k in keys(_series_defaults)
-        haskey(plotattributes, k) &&
-            slice_arg!(plotattributes, plotattributes, k, commandIndex, false)
-    end
-    plotattributes
-end
 
 label_to_string(label::Bool, series_plotindex) =
     label ? label_to_string(:auto, series_plotindex) : ""
@@ -2027,92 +1541,6 @@ label_to_string(label::Symbol, series_plotindex) =
         throw(ArgumentError("unsupported symbol $(label) passed to `label`"))
     end
 label_to_string(label, series_plotindex) = string(label)  # Fallback to string promotion
-
-function _update_series_attributes!(plotattributes::AKW, plt::Plot, sp::Subplot)
-    pkg = plt.backend
-    globalIndex = plotattributes[:series_plotindex]
-    plotIndex = _series_index(plotattributes, sp)
-
-    aliasesAndAutopick(
-        plotattributes,
-        :linestyle,
-        _styleAliases,
-        supported_styles(pkg),
-        plotIndex,
-    )
-    aliasesAndAutopick(
-        plotattributes,
-        :markershape,
-        _markerAliases,
-        supported_markers(pkg),
-        plotIndex,
-    )
-
-    # update alphas
-    for asym in (:linealpha, :markeralpha, :fillalpha)
-        if plotattributes[asym] === nothing
-            plotattributes[asym] = plotattributes[:seriesalpha]
-        end
-    end
-    if plotattributes[:markerstrokealpha] === nothing
-        plotattributes[:markerstrokealpha] = plotattributes[:markeralpha]
-    end
-
-    # update series color
-    scolor = plotattributes[:seriescolor]
-    stype = plotattributes[:seriestype]
-    plotattributes[:seriescolor] = scolor = get_series_color(scolor, sp, plotIndex, stype)
-
-    # update other colors (`linecolor`, `markercolor`, `fillcolor`) <- for grep
-    for s in (:line, :marker, :fill)
-        csym, asym = Symbol(s, :color), Symbol(s, :alpha)
-        plotattributes[csym] = if plotattributes[csym] === :auto
-            plot_color(if has_black_border_for_default(stype) && s === :line
-                sp[:foreground_color_subplot]
-            else
-                scolor
-            end)
-        elseif plotattributes[csym] === :match
-            plot_color(scolor)
-        else
-            get_series_color(plotattributes[csym], sp, plotIndex, stype)
-        end
-    end
-
-    # update markerstrokecolor
-    plotattributes[:markerstrokecolor] = if plotattributes[:markerstrokecolor] === :match
-        plot_color(sp[:foreground_color_subplot])
-    elseif plotattributes[:markerstrokecolor] === :auto
-        get_series_color(plotattributes[:markercolor], sp, plotIndex, stype)
-    else
-        get_series_color(plotattributes[:markerstrokecolor], sp, plotIndex, stype)
-    end
-
-    # if marker_z, fill_z or line_z are set, ensure we have a gradient
-    if plotattributes[:marker_z] !== nothing
-        ensure_gradient!(plotattributes, :markercolor, :markeralpha)
-    end
-    if plotattributes[:line_z] !== nothing
-        ensure_gradient!(plotattributes, :linecolor, :linealpha)
-    end
-    if plotattributes[:fill_z] !== nothing
-        ensure_gradient!(plotattributes, :fillcolor, :fillalpha)
-    end
-
-    # scatter plots don't have a line, but must have a shape
-    if plotattributes[:seriestype] in (:scatter, :scatterbins, :scatterhist, :scatter3d)
-        plotattributes[:linewidth] = 0
-        if plotattributes[:markershape] === :none
-            plotattributes[:markershape] = :circle
-        end
-    end
-
-    # set label
-    plotattributes[:label] = label_to_string.(plotattributes[:label], globalIndex)
-
-    _replace_linewidth(plotattributes)
-    plotattributes
-end
 
 _series_index(plotattributes, sp) =
     if haskey(plotattributes, :series_index)
@@ -2160,14 +1588,14 @@ macro add_attributes(level, expr, match_table)
                 Expr(:ref, Expr(:call, getfield, Plots, field), QuoteNode(exp_key)),
                 value,
             ),
-            :(Plots.add_aliases($(QuoteNode(exp_key)), $(QuoteNode(pl_key)))),
-            :(Plots.add_aliases(
+            :($add_aliases($(QuoteNode(exp_key)), $(QuoteNode(pl_key)))),
+            :($add_aliases(
                 $(QuoteNode(exp_key)),
-                $(QuoteNode(Plots.make_non_underscore(exp_key))),
+                $(QuoteNode(make_non_underscore(exp_key))),
             )),
-            :(Plots.add_aliases(
+            :($add_aliases(
                 $(QuoteNode(exp_key)),
-                $(QuoteNode(Plots.make_non_underscore(pl_key))),
+                $(QuoteNode(make_non_underscore(pl_key))),
             )),
         )
     end

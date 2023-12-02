@@ -44,20 +44,6 @@ function _check_installed(backend::Union{Module,AbstractString,Symbol}; warn = t
     version
 end
 
-function _check_compat(m::Module; warn = true)
-    (be_v = _check_installed(m; warn)) === nothing && return
-    if (be_c = _plots_compats[string(m)]) isa String  # julia 1.6
-        if be_v ∉ Pkg.Types.semver_spec(be_c)
-            @warn "`$m` $be_v is not compatible with this version of `Plots`. The declared compatibility is $(be_c)."
-        end
-    else
-        if intersect(be_v, be_c.val) |> isempty
-            @warn "`$m` $be_v is not compatible with this version of `Plots`. The declared compatibility is $(be_c.str)."
-        end
-    end
-    nothing
-end
-
 _path(sym::Symbol) =
     if sym ∈ (:pgfplots, :pyplot)
         @path joinpath(@__DIR__, "backends", "deprecated", "$sym.jl")
@@ -372,6 +358,73 @@ for s in (:attr, :seriestype, :marker, :style, :scale)
     end
 end
 
+# -----------------------------------------------------------------------------
+
+const _already_warned = Dict{Symbol,Set{Symbol}}()
+const _to_warn = Set{Symbol}()
+
+should_warn_on_unsupported(::AbstractBackend) = _plot_defaults[:warn_on_unsupported]
+
+function warn_on_unsupported_args(pkg::AbstractBackend, plotattributes)
+    empty!(_to_warn)
+    bend = Plots.backend_name(pkg)
+    already_warned = get!(_already_warned, bend) do
+        Set{Symbol}()
+    end
+    extra_kwargs = Dict{Symbol,Any}()
+    for k in Plots.explicitkeys(plotattributes)
+        (is_attr_supported(pkg, k) && k ∉ keys(Commons._deprecated_attributes)) && continue
+        k in Commons._suppress_warnings && continue
+        if ismissing(default(k))
+            extra_kwargs[k] = pop_kw!(plotattributes, k)
+        elseif plotattributes[k] != default(k)
+            k in already_warned || push!(_to_warn, k)
+        end
+    end
+
+    if !isempty(_to_warn) &&
+       get(plotattributes, :warn_on_unsupported, should_warn_on_unsupported(pkg))
+        for k in sort(collect(_to_warn))
+            push!(already_warned, k)
+            if k in keys(Commons._deprecated_attributes)
+                @warn """
+                Keyword argument `$k` is deprecated.
+                Please use `$(Commons._deprecated_attributes[k])` instead.
+                """
+            else
+                @warn "Keyword argument $k not supported with $pkg.  Choose from: $(join(supported_attrs(pkg), ", "))"
+            end
+        end
+    end
+    extra_kwargs
+end
+
+function warn_on_unsupported(pkg::AbstractBackend, plotattributes)
+    get(plotattributes, :warn_on_unsupported, should_warn_on_unsupported(pkg)) || return
+    is_seriestype_supported(pkg, plotattributes[:seriestype]) ||
+        @warn "seriestype $(plotattributes[:seriestype]) is unsupported with $pkg. Choose from: $(supported_seriestypes(pkg))"
+    is_style_supported(pkg, plotattributes[:linestyle]) ||
+        @warn "linestyle $(plotattributes[:linestyle]) is unsupported with $pkg. Choose from: $(supported_styles(pkg))"
+    is_marker_supported(pkg, plotattributes[:markershape]) ||
+        @warn "markershape $(plotattributes[:markershape]) is unsupported with $pkg. Choose from: $(supported_markers(pkg))"
+end
+
+function warn_on_unsupported_scales(pkg::AbstractBackend, plotattributes::AKW)
+    get(plotattributes, :warn_on_unsupported, should_warn_on_unsupported(pkg)) || return
+    for k in (:xscale, :yscale, :zscale, :scale)
+        if haskey(plotattributes, k)
+            v = plotattributes[k]
+            if !all(is_scale_supported.(Ref(pkg), v))
+                @warn """
+                scale $v is unsupported with $pkg.
+                Choose from: $(supported_scales(pkg))
+                """
+            end
+        end
+    end
+end
+
+# -----------------------------------------------------------------------------
 ################################################################################
 # custom hooks
 
@@ -394,16 +447,6 @@ _runtime_init(::AbstractBackend) = nothing
 ################################################################################
 # initialize the backends
 function _initialize_backend(pkg::AbstractBackend)
-    _pre_imports(pkg)
-    name = backend_package_name(pkg)
-    # NOTE: this is a hack importing in `Main` (expecting the package to be in `Project.toml`, remove in `Plots@2.0`)
-    # FIXME: remove hard `GR` dependency in `Plots@2.0`
-    @eval name === :GR ? Plots : Main begin
-        import $name
-        export $name
-        $(_check_compat)($name)
-    end
-    _post_imports(pkg)
     _runtime_init(pkg)
     nothing
 end
@@ -513,7 +556,6 @@ const _gr_attr = merge_with_base_supported([
     :line,
     :ribbon,
     :quiver,
-    :orientation,
     :overwrite_figure,
     :plot_title,
     :plot_titlefontcolor,
@@ -565,7 +607,7 @@ const _gr_seriestype = [
     :shape,
 ]
 const _gr_style = [:auto, :solid, :dash, :dot, :dashdot, :dashdotdot]
-const _gr_marker = vcat(_allMarkers, :pixel)
+const _gr_marker = vcat(Commons._allMarkers, :pixel)
 const _gr_scale = [:identity, :ln, :log2, :log10]
 is_marker_supported(::GRBackend, shape::Shape) = true
 
@@ -697,7 +739,6 @@ const _plotly_attr = merge_with_base_supported([
     :levels,
     :ribbon,
     :quiver,
-    :orientation,
     # :overwrite_figure,
     :polar,
     :plot_title,
@@ -820,7 +861,6 @@ const _pgfplots_attr = merge_with_base_supported([
     :marker_z,
     :levels,
     # :ribbon, :quiver, :arrow,
-    # :orientation,
     # :overwrite_figure,
     :polar,
     # :normalize, :weights, :contours,
@@ -859,7 +899,7 @@ const _pgfplots_marker = [
     :pentagon,
     :hline,
     :vline,
-] #vcat(_allMarkers, Shape)
+] #vcat(Commons._allMarkers, Shape)
 const _pgfplots_scale = [:identity, :ln, :log2, :log10]
 
 # ------------------------------------------------------------------------------
@@ -1002,7 +1042,6 @@ const _pyplot_attr = merge_with_base_supported([
     :ribbon,
     :quiver,
     :arrow,
-    :orientation,
     :overwrite_figure,
     :polar,
     :plot_title,
@@ -1058,7 +1097,7 @@ const _pyplot_seriestype = [
     :wireframe,
 ]
 const _pyplot_style = [:auto, :solid, :dash, :dot, :dashdot]
-const _pyplot_marker = vcat(_allMarkers, :pixel)
+const _pyplot_marker = vcat(Commons._allMarkers, :pixel)
 const _pyplot_scale = [:identity, :ln, :log2, :log10]
 
 # ------------------------------------------------------------------------------
@@ -1187,7 +1226,6 @@ const _pythonplot_attr = merge_with_base_supported([
     :ribbon,
     :quiver,
     :arrow,
-    :orientation,
     :overwrite_figure,
     :polar,
     :normalize,
@@ -1251,7 +1289,7 @@ const _gaston_attr = merge_with_base_supported([
     # :ribbon,
     :quiver,
     :arrow,
-    # :orientation, :overwrite_figure,
+    # :overwrite_figure,
     :polar,
     # :normalize, :weights, :contours,
     :aspect_ratio,
@@ -1443,7 +1481,6 @@ const _hdf5_attr = merge_with_base_supported([
     :ribbon,
     :quiver,
     :arrow,
-    :orientation,
     :overwrite_figure,
     :polar,
     :normalize,
@@ -1474,7 +1511,7 @@ const _hdf5_seriestype = [
     :wireframe,
 ]
 const _hdf5_style = [:auto, :solid, :dash, :dot, :dashdot]
-const _hdf5_marker = vcat(_allMarkers, :pixel)
+const _hdf5_marker = vcat(Commons._allMarkers, :pixel)
 const _hdf5_scale = [:identity, :ln, :log2, :log10]
 
 # Additional constants
@@ -1547,7 +1584,6 @@ const _inspectdr_attr = merge_with_base_supported([
     #    :line_z,
     #    :levels,
     #   :ribbon, :quiver, :arrow,
-    #    :orientation,
     :overwrite_figure,
     :polar,
     #    :normalize, :weights,
@@ -1564,7 +1600,7 @@ const _inspectdr_seriestype = [
     :shape,
     :straightline, #, :steppre, :stepmid, :steppost
 ]
-#see: _allMarkers, _shape_keys
+#see: Commons._allMarkers, _shape_keys
 const _inspectdr_marker = Symbol[
     :none,
     :auto,
@@ -1705,7 +1741,6 @@ const _pgfplotsx_attr = merge_with_base_supported([
     :legend_title_font_pointsize,
     :ribbon,
     :quiver,
-    :orientation,
     :overwrite_figure,
     :polar,
     :plot_title,

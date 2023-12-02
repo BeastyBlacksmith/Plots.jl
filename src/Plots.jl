@@ -32,7 +32,6 @@ import RecipesPipeline:
     Formatted,
     reset_kw!,
     SliceIt,
-    Surface,
     pop_kw!,
     Volume,
     is3d
@@ -88,18 +87,13 @@ export
     backend_object,
     aliases,
 
-    Shape,
     text,
     font,
     stroke,
     brush,
-    Surface,
     OHLC,
     arrow,
-    Segments,
-    Formatted,
 
-    Animation,
     frame,
     gif,
     mov,
@@ -126,43 +120,66 @@ export
     scalefontsizes,
     resetfontsizes
 #! format: on
-# ---------------------------------------------------------
-
-import NaNMath # define functions that ignores NaNs. To overcome the destructive effects of https://github.com/JuliaLang/julia/pull/12563
-ignorenan_minimum(x::AbstractArray{<:AbstractFloat}) = NaNMath.minimum(x)
-ignorenan_minimum(x) = Base.minimum(x)
-ignorenan_maximum(x::AbstractArray{<:AbstractFloat}) = NaNMath.maximum(x)
-ignorenan_maximum(x) = Base.maximum(x)
-ignorenan_mean(x::AbstractArray{<:AbstractFloat}) = NaNMath.mean(x)
-ignorenan_mean(x) = Statistics.mean(x)
-ignorenan_extrema(x::AbstractArray{<:AbstractFloat}) = NaNMath.extrema(x)
-ignorenan_extrema(x) = Base.extrema(x)
-
-# ---------------------------------------------------------
-import Measures
-include("plotmeasures.jl")
+using Measures: Measures
+include("PlotMeasures.jl")
 using .PlotMeasures
-import .PlotMeasures: Length, AbsoluteLength, Measure, width, height
+using .PlotMeasures: Length, AbsoluteLength, Measure
+import .PlotMeasures: width, height
 # ---------------------------------------------------------
-
-const PLOTS_SEED  = 1234
-const PX_PER_INCH = 100
-const DPI         = PX_PER_INCH
-const MM_PER_INCH = 25.4
-const MM_PER_PX   = MM_PER_INCH / PX_PER_INCH
-
-include("types.jl")
+macro ScopeModule(mod::Symbol, parent::Symbol, symbols...)
+    Expr(:module, true, mod,
+      Expr(:block,
+        Expr(:import,
+          Expr(:(:),
+            Expr(:., :., :., parent),
+            (Expr(:., s isa Expr ? s.args[1] : s) for s in symbols)...
+          )
+        ),
+        Expr(:export, (s isa Expr ? s.args[1] : s for s in symbols)...)
+      )
+    ) |> esc
+end
+include("Commons/Commons.jl")
+using .Commons
+using .Commons.Frontend
+# ---------------------------------------------------------
+include("Fonts.jl")
+@reexport using .Fonts
+using .Fonts: Font, PlotText
+include("Ticks.jl")
+using .Ticks
+include("Series.jl")
+using .PlotsSeries
+include("Subplots.jl")
+using .Subplots
+include("Axes.jl")
+using .Axes
+include("Surfaces.jl")
+include("Colorbars.jl")
+using .Colorbars
+include("PlotsPlots.jl")
+using .PlotsPlots
+include("layouts.jl")
+# ---------------------------------------------------------
 include("utils.jl")
-include("colorbars.jl")
-include("axes.jl")
-include("args.jl")
-include("components.jl")
+using .Surfaces
+include("axes_utils.jl")
 include("legend.jl")
-include("consts.jl")
+include("Shapes.jl")
+@reexport using .Shapes
+using .Shapes: Shape, _shapes
+include("Annotations.jl")
+using .Annotations
+using .Annotations: SeriesAnnotations
+include("Arrows.jl")
+using .Arrows
+include("Strokes.jl")
+using .Strokes
+include("BezierCurves.jl")
+using .BezierCurves
 include("themes.jl")
 include("plot.jl")
 include("pipeline.jl")
-include("layouts.jl")
 include("arg_desc.jl")
 include("recipes.jl")
 include("animation.jl")

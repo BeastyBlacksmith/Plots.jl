@@ -1,4 +1,5 @@
 
+struct PlaceHolder end
 mutable struct CurrentPlot
     nullableplot::Union{AbstractPlot,Nothing}
 end
@@ -78,23 +79,23 @@ Pass any attribute to `plotattr` as a String to look up its docstring, e.g., `pl
 # Extended help
 
 ## Series attributes
-- $(_generate_doclist(_all_series_args))
+- $(_generate_doclist(Commons._all_series_args))
 
 ## Axis attributes
 Prepend these with the axis letter (x, y or z)
-- $(_generate_doclist(_all_axis_args))
+- $(_generate_doclist(Commons._all_axis_args))
 
 ## Subplot attributes
-- $(_generate_doclist(_all_subplot_args))
+- $(_generate_doclist(Commons._all_subplot_args))
 
 ## Plot attributes
-- $(_generate_doclist(_all_plot_args))
+- $(_generate_doclist(Commons._all_plot_args))
 """
 function RecipesBase.plot(args...; kw...)
     @nospecialize
     # this creates a new plot with args/kw and sets it to be the current plot
     plotattributes = KW(kw)
-    Plots.preprocess_attributes!(plotattributes)
+    Plots.Commons.preprocess_attributes!(plotattributes)
 
     # create an empty Plot then process
     plt = Plot()
@@ -118,7 +119,7 @@ function plot!(
 )
     @nospecialize
     plotattributes = KW(kw)
-    Plots.preprocess_attributes!(plotattributes)
+    Plots.Commons.preprocess_attributes!(plotattributes)
 
     # build our plot vector from the args
     plts = Plot[plt1]
@@ -181,7 +182,13 @@ function plot!(
 
     # first apply any args for the subplots
     for (idx, sp) in enumerate(plt.subplots)
-        _update_subplot_args(plt, sp, idx == ttl_idx ? KW() : plotattributes, idx, false)
+        PlotsPlots._update_subplot_args(
+            plt,
+            sp,
+            idx == ttl_idx ? KW() : plotattributes,
+            idx,
+            false,
+        )
     end
 
     # finish up
@@ -208,7 +215,7 @@ plot(plt::Plot, args...; kw...) = plot!(deepcopy(plt), args...; kw...)
 function plot!(plt::Plot, args...; kw...)
     @nospecialize
     plotattributes = KW(kw)
-    Plots.preprocess_attributes!(plotattributes)
+    Plots.Commons.preprocess_attributes!(plotattributes)
     # merge!(plt.user_attr, plotattributes)
     _plot!(plt, plotattributes, args)
 end
